@@ -1,0 +1,40 @@
+*straps-renamer.txt* Generated Straps session titles
+
+*straps-renamer* *straps-renamer-setup*
+Install Straps and this plugin on runtimepath: >lua
+  require("straps").setup()
+  require("straps_renamer").setup({ auto = { enabled = false } })
+<
+The Lua module keeps its underscore name. setup(opts) returns the module.
+Unknown keys and invalid types raise errors before configuration changes.
+Options: anthropic_model, anthropic_max_tokens (200), openai_model,
+openai_max_output_tokens (200), codex_model (optional), max_excerpt_bytes
+(12000), tool_input_bytes (160), max_title_chars (80), timeout_ms (30000).
+Model names must be nonempty strings; numeric limits must be finite and positive.
+auto contains enabled (true), on_start (true), every_runs (3), subagents
+(false), keep_manual (true), notify (true). every_runs accepts nonnegative
+numbers; 0 disables periodic titles and fractions are floored.
+
+Automatic renaming is enabled when the plugin loads, even without setup().
+Each request sends a transcript excerpt, including user/assistant text and
+tool inputs, to the session provider. Disable auto.enabled to stop automatic
+requests. Manual titles are retained by default, including titles changed
+while a request is in progress. See README.md for provider credentials.
+
+*straps-renamer-commands* *:StrapsRenameAuto*
+:StrapsRenameAuto requests a title for the current saved Straps session.
+The result updates <session>.straps.meta while retaining other metadata.
+Straps' :StrapsRename command remains unchanged.
+
+*straps-renamer-tools*
+This plugin defines no agent tools. Registry defaults fn.renamer_excerpt,
+fn.renamer_prompt and fn.renamer_clean control excerpt, prompt and cleanup.
+Redefine a default with :StrapsEdit; setup preserves user redefinitions.
+
+*straps-renamer-status*
+require("straps_renamer").status() returns entries, inflight and config.
+inflight lists buffer numbers with outstanding title requests.
+:checkhealth straps_renamer reports registry setup, automatic renaming and curl.
+Health checks do not make provider requests or test credentials.
+
+vim:tw=78:ts=8:ft=help:norl:

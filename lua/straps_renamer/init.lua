@@ -1,7 +1,7 @@
--- straps-renamer: :StrapsRename with no argument asks a cheap model for a
--- grep-friendly title and stores it as the session's durable title (the
--- same .meta file straps' own :StrapsRename {title} writes). The same
--- rename runs automatically on a session's first run and every few runs.
+-- straps-renamer: :StrapsRenameAuto asks a cheap model for a grep-friendly
+-- title and stores it as the session's durable title (the same .meta file
+-- straps' own :StrapsRename {title} writes). The same rename runs
+-- automatically on a session's first run and every few runs.
 
 local M = {}
 
@@ -38,6 +38,25 @@ local function ensure_entries()
 end
 
 function M.setup(opts)
+  assert(opts == nil or type(opts) == "table", "straps_renamer: setup options must be a table")
+  local function validate(options, defaults, prefix)
+    for key, value in pairs(options) do
+      local name = prefix .. tostring(key)
+      local expected = name == "codex_model" and "string" or type(defaults[key])
+      assert(defaults[key] ~= nil or name == "codex_model", "straps_renamer: unknown option " .. name)
+      assert(type(value) == expected, "straps_renamer: invalid type for " .. name)
+      if type(value) == "table" then
+        validate(value, defaults[key], name .. ".")
+      elseif type(value) == "number" then
+        local minimum = name == "auto.every_runs" and 0 or 1
+        assert(value == value and value < math.huge and value >= minimum,
+          "straps_renamer: " .. name .. " must be finite and >= " .. minimum)
+      elseif type(value) == "string" then
+        assert(value ~= "", "straps_renamer: " .. name .. " must be nonempty")
+      end
+    end
+  end
+  validate(opts or {}, M.config, "")
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
   ensure_entries()
   M.define_command()
@@ -63,8 +82,10 @@ local function refresh_views()
 end
 
 --- The session's durable title and whether this plugin wrote it. Reads the
---- companion .meta file straps keeps; straps' own writers store { title }
---- only, so a title without the generated_by field was set by hand.
+--- companion .meta file straps keeps. The plugin stores generated_by and
+--- generated_title beside the title; straps' writers merge fields and keep
+--- both, so the title counts as generated only while it equals
+--- generated_title.
 function M.title_of(path)
   local meta = path .. ".meta"
   if vim.fn.filereadable(meta) == 0 then
@@ -74,13 +95,39 @@ function M.title_of(path)
   if not ok or type(decoded) ~= "table" or type(decoded.title) ~= "string" or decoded.title == "" then
     return nil, false
   end
-  return decoded.title, decoded.generated_by == GENERATED_BY
+  return decoded.title, decoded.generated_by == GENERATED_BY and decoded.generated_title == decoded.title
 end
 
 local function write_generated_title(path, title)
-  local ok = pcall(vim.fn.writefile,
-    { vim.json.encode({ title = title, generated_by = GENERATED_BY }) }, path .. ".meta")
-  return ok and require("straps.state").session_title(path) == title
+  local mp = path .. ".meta"
+  local meta = {}
+  if vim.fn.filereadable(mp) == 1 then
+    local ok, decoded = pcall(vim.json.decode, table.concat(vim.fn.readfile(mp), "\n"))
+    if ok and type(decoded) == "table" then
+      meta = decoded
+    end
+  end
+  meta.title, meta.generated_by, meta.generated_title = title, GENERATED_BY, title
+  local tmp = mp .. ".tmp"
+  local ok_write, code = pcall(vim.fn.writefile, { vim.json.encode(meta) }, tmp)
+  if not ok_write or code ~= 0 then
+    os.remove(tmp)
+    return false
+  end
+  if not vim.uv.fs_rename(tmp, mp) then
+    os.remove(tmp)
+    return false
+  end
+  return require("straps.state").session_title(path) == title
+end
+
+local EMPTY_TRANSCRIPT = "the transcript has no user or assistant text yet"
+
+local function quoted(title)
+  if title == nil then
+    return "(no title)"
+  end
+  return '"' .. tostring(title) .. '"'
 end
 
 --- Generate and store a title for the session in bufnr. cb(title, err) is
@@ -99,12 +146,12 @@ function M.rename(bufnr, cb, opts)
       vim.notify("straps_renamer: " .. msg, level or vim.log.levels.ERROR)
     end
     cb(nil, msg)
-    return false
+    return false, msg
   end
-  local failure_level = opts.quiet and vim.log.levels.WARN or nil
+  local failure_level = opts.quiet and vim.log.levels.WARN or vim.log.levels.ERROR
   local path = session_path(bufnr)
   if not path then
-    return fail("buffer " .. tostring(bufnr) .. " is not a saved session; nothing to rename", failure_level)
+    return fail("buffer " .. tostring(bufnr) .. " is not a saved session; nothing to rename", vim.log.levels.WARN)
   end
   if inflight[bufnr] then
     return fail("a rename is already in progress for this session", failure_level)
@@ -114,7 +161,7 @@ function M.rename(bufnr, cb, opts)
   local excerpt = registry.call("fn.renamer_excerpt", bufnr,
     { max_bytes = cfg.max_excerpt_bytes, tool_input_bytes = cfg.tool_input_bytes })
   if not excerpt or not excerpt:match("%S") then
-    return fail("the transcript has no user or assistant text yet", opts.quiet and "silent" or nil)
+    return fail(EMPTY_TRANSCRIPT, opts.quiet and "silent" or vim.log.levels.ERROR)
   end
   local prompt = registry.call("fn.renamer_prompt", excerpt)
   local request = require("straps_renamer.request")
@@ -123,6 +170,9 @@ function M.rename(bufnr, cb, opts)
   if provider_err then return fail(provider_err, failure_level) end
   local title_at_send = M.title_of(path)
   inflight[bufnr] = true
+  if not opts.quiet then
+    vim.notify("straps_renamer: asking " .. provider .. " for a title…", vim.log.levels.INFO)
+  end
   local ok_send, send_err = pcall(request.send, provider, cfg, prompt, function(raw, err)
     inflight[bufnr] = nil
     if not raw then
@@ -130,10 +180,10 @@ function M.rename(bufnr, cb, opts)
     end
     local title = registry.call("fn.renamer_clean", raw, cfg.max_title_chars)
     if not title then
-      return fail(provider .. " returned no usable title: " .. vim.inspect(raw), failure_level)
+      return fail(provider .. " returned no usable title: " .. quoted(raw), failure_level)
     end
     if M.title_of(path) ~= title_at_send then
-      return fail("the title changed while the model was replying; keeping " .. vim.inspect(M.title_of(path)),
+      return fail("the title changed while the model was replying; keeping " .. quoted(M.title_of(path)),
         failure_level)
     end
     if not write_generated_title(path, title) then
@@ -141,7 +191,7 @@ function M.rename(bufnr, cb, opts)
     end
     refresh_views()
     if opts.quiet ~= "silent" then
-      vim.notify("straps_renamer: session titled " .. title, opts.quiet and vim.log.levels.INFO or nil)
+      vim.notify("straps_renamer: session titled " .. title, vim.log.levels.INFO)
     end
     cb(title)
   end, bufnr)
@@ -177,20 +227,21 @@ end
 local function auto_rename(bufnr, why)
   local ok, reason = M.auto_wanted(bufnr)
   if not ok then
-    return false, reason
+    return false, reason, false
   end
-  if not M.rename(bufnr, nil, { quiet = M.config.auto.notify and true or "silent" }) then
-    return false, "rename refused"
+  local sent, err = M.rename(bufnr, nil, { quiet = M.config.auto.notify and true or "silent" })
+  if not sent then
+    return false, "rename refused: " .. tostring(err), err ~= EMPTY_TRANSCRIPT
   end
-  return true, why
+  return true, why, true
 end
 
 local function on_run_start(bufnr)
   if vim.b[bufnr].straps_renamer_started or not M.config.auto.on_start then
     return false, "not the first run"
   end
-  local ok, why = auto_rename(bufnr, "first run started")
-  if ok then
+  local ok, why, attempted = auto_rename(bufnr, "first run started")
+  if attempted then
     vim.b[bufnr].straps_renamer_started = true
   end
   return ok, why
@@ -234,28 +285,18 @@ end
 M._on_run_start = on_run_start
 M._on_run_end = on_run_end
 
---- :StrapsRename            generate a title with the cheap model
---- :StrapsRename {title}    set the title directly (straps' own behaviour)
---- :StrapsRename!           open straps' manual prompt, pre-filled
+--- :StrapsRenameAuto   ask the cheap model for a title and store it
 function M.define_command()
-  vim.api.nvim_create_user_command("StrapsRename", function(opts)
-    local ui = require("straps.ui")
-    local target = ui.resolve_session(vim.api.nvim_get_current_buf())
+  vim.api.nvim_create_user_command("StrapsRenameAuto", function()
+    local target = require("straps.ui").resolve_session(vim.api.nvim_get_current_buf())
     if not target then
-      vim.notify("straps: run :StrapsRename on a session buffer", vim.log.levels.ERROR)
+      vim.notify("straps_renamer: run :StrapsRenameAuto on a session buffer", vim.log.levels.ERROR)
       return
-    end
-    if opts.args ~= "" then
-      return ui.rename_session(target, opts.args)
-    end
-    if opts.bang then
-      return ui.rename_session(target, nil)
     end
     M.rename(target)
   end, {
-    nargs = "?",
-    bang = true,
-    desc = "straps: title this session (no arg = ask a cheap model; ! = manual prompt; arg = set directly)",
+    nargs = 0,
+    desc = "straps_renamer: title this session with a cheap model",
   })
 end
 

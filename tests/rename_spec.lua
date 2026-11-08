@@ -1,6 +1,6 @@
 -- Rename round-trip against fake `curl` binaries: the request shape sent to
 -- each backend, the title written to the session's .meta file, the error
--- paths, and the :StrapsRename command's three modes.
+-- paths, and the :StrapsRenameAuto command.
 -- Run: busted tests/rename_spec.lua
 
 local H = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h") .. "/helpers.lua")
@@ -301,59 +301,103 @@ describe("timeout_ms", function()
   end)
 end)
 
-describe(":StrapsRename", function()
+describe(":StrapsRenameAuto and core :StrapsRename", function()
   step(function()
     vim.env.PATH = tmp .. "/ok:" .. real_path
   end)
 
-  it("is the renamer's command, with bang support", function()
+  it("leaves core's :StrapsRename in place and installs no redefinition autocmds", function()
     local cmd = vim.api.nvim_get_commands({})["StrapsRename"]
     assert.is_not_nil(cmd)
-    assert.is_true(cmd.bang)
-    assert.is_not_nil(cmd.definition:find("cheap model", 1, true))
+    assert.is_nil(cmd.definition:find("cheap model", 1, true), cmd.definition)
+    assert.is_false(pcall(vim.api.nvim_get_autocmds, { group = "straps_renamer" }))
   end)
 
-  it("with an argument sets the title directly without calling the model", function()
+  it(":StrapsRename with no argument opens core's prompt without calling the model", function()
     local bufnr, path = new_session("manual")
     local before = vim.fn.readfile(tmp .. "/n")[1]
+    local real_input = vim.ui.input
+    vim.ui.input = function(_, cb) cb("from prompt") end
     vim.api.nvim_set_current_buf(bufnr)
-    vim.cmd("StrapsRename hand written title")
-    assert.equals("hand written title", state.session_title(path))
+    vim.cmd("StrapsRename")
+    vim.ui.input = real_input
+    assert.equals("from prompt", state.session_title(path))
     assert.equals(before, vim.fn.readfile(tmp .. "/n")[1])
   end)
 
-  it("with a bang opens the manual prompt pre-filled with the current title", function()
-    local bufnr, path = new_session("manual")
-    state.set_session_title(path, "old title")
-    local seen_default
-    local real_input = vim.ui.input
-    vim.ui.input = function(opts, cb)
-      seen_default = opts.default
-      cb("from prompt")
-    end
-    vim.api.nvim_set_current_buf(bufnr)
-    vim.cmd("StrapsRename!")
-    vim.ui.input = real_input
-    assert.equals("old title", seen_default)
-    assert.equals("from prompt", state.session_title(path))
-  end)
-
-  it("with no argument asks the model and stores the title", function()
+  it(":StrapsRenameAuto asks the model, reports the wait at INFO, and stores the title", function()
     local bufnr, path = new_session("auto")
     vim.api.nvim_set_current_buf(bufnr)
-    vim.cmd("StrapsRename")
+    local n = #notices
+    vim.cmd("StrapsRenameAuto")
+    assert.equals(n + 1, #notices)
+    assert.equals("straps_renamer: asking anthropic for a title…", notices[n + 1].msg)
+    assert.equals(vim.log.levels.INFO, notices[n + 1].level)
     vim.wait(10000, function() return state.session_title(path) ~= nil end, 20)
     assert.equals("anthropic title for lexer.lua rename", state.session_title(path))
+    assert.equals(vim.log.levels.INFO, notices[#notices].level)
   end)
 
-  it("errors on a non-session buffer", function()
+  it(":StrapsRenameAuto errors on a non-session buffer with the plugin prefix", function()
     local plain = vim.api.nvim_create_buf(true, false)
     vim.api.nvim_set_current_buf(plain)
     local n = #notices
-    vim.cmd("StrapsRename")
+    vim.cmd("StrapsRenameAuto")
     assert.equals(n + 1, #notices)
-    assert.is_not_nil(notices[#notices].msg:find("run :StrapsRename on a session buffer", 1, true))
+    assert.equals("straps_renamer: run :StrapsRenameAuto on a session buffer", notices[#notices].msg)
     assert.equals(vim.log.levels.ERROR, notices[#notices].level)
+  end)
+end)
+
+describe("notices", function()
+  it("reports an unsaved buffer at WARN with the plugin prefix", function()
+    local scratch = vim.api.nvim_create_buf(true, false)
+    local n = #notices
+    rename_sync(scratch)
+    assert.equals(n + 1, #notices)
+    assert.is_not_nil(notices[#notices].msg:find("^straps_renamer: buffer %d+ is not a saved session"), notices[#notices].msg)
+    assert.equals(vim.log.levels.WARN, notices[#notices].level)
+  end)
+
+  it("quotes an unusable reply as plain text", function()
+    vim.env.PATH = tmp .. "/ok:" .. real_path
+    local saved = registry.get("fn.renamer_clean")
+    registry.define({ name = "fn.renamer_clean", kind = "fn", doc = "test: reject", source = [[return function() return nil end]] })
+    local bufnr = new_session("unusable")
+    vim.b[bufnr].straps_provider = "openai"
+    local _, err = rename_sync(bufnr)
+    registry.define({ name = "fn.renamer_clean", kind = "fn", doc = saved.doc, source = saved.source })
+    assert.equals('openai returned no usable title: "  "openai title for lexer.lua rename."\n"', err)
+  end)
+
+  it("names a cleared title as (no title)", function()
+    vim.env.PATH = tmp .. "/slow:" .. real_path
+    local bufnr, path = new_session("cleared")
+    state.set_session_title(path, "before")
+    local done, err
+    renamer.rename(bufnr, function(_, e) done, err = true, e end)
+    state.set_session_title(path, "")
+    vim.wait(10000, function() return done end, 20)
+    vim.env.PATH = tmp .. "/ok:" .. real_path
+    assert.equals("the title changed while the model was replying; keeping (no title)", err)
+  end)
+end)
+
+describe("provider pin", function()
+  it("survives a generated title", function()
+    vim.env.PATH = tmp .. "/ok:" .. real_path
+    local bufnr, path = new_session("pinned")
+    assert.is_true(state.set_session_pin(bufnr, "anthropic", "claude-pinned", { id = "claude-pinned", label = "x" }))
+    local title, err = rename_sync(bufnr)
+    assert.is_nil(err)
+    assert.equals("anthropic title for lexer.lua rename", title)
+    local provider, model, why, entry = state.session_pin(path)
+    assert.equals("anthropic", provider)
+    assert.equals("claude-pinned", model)
+    assert.is_nil(why)
+    assert.equals("claude-pinned", entry and entry.id)
+    assert.equals("anthropic title for lexer.lua rename", state.session_title(path))
+    assert.equals(0, vim.fn.filereadable(path .. ".meta.tmp"))
   end)
 end)
 

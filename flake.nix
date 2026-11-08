@@ -1,9 +1,9 @@
 {
-  description = "straps-renamer — :StrapsRename titles a straps session with a cheap model so the session is greppable";
+  description = "straps-renamer — :StrapsRenameAuto titles a straps session with a cheap model so the session is greppable";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    straps.url = "git+ssh://git@github.com/ducharmemp/straps";
+    straps.url = "git+https://github.com/ducharmemp/straps";
     straps.inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -36,9 +36,7 @@
       #   imports = [ straps.nixvimModules.default straps-renamer.nixvimModules.default ];
       #   plugins.straps.enable = true;
       #   plugins.straps-renamer.enable = true;
-      # setup() runs after straps' own setup (lib.mkAfter), which is all the
-      # command redefinition needs; the plugin file also redefines it on
-      # VimEnter for non-nixvim installs where straps' plugin file loads later.
+      # setup() runs after straps' own setup (lib.mkAfter).
       nixvimModules = rec {
         straps-renamer = { lib, config, pkgs, ... }:
           let

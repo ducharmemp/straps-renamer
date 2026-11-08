@@ -1,22 +1,22 @@
 # straps-renamer
 
-`:StrapsRename` with no argument asks a cheap model for a title and stores it as the session's durable title, the same `<session>.straps.meta` file straps' own `:StrapsRename {title}` writes. The same rename runs on its own when a session's first run starts and after every few runs (see Automatic renames). The resume picker, the agents buffer and `:StrapsResume<Tab>` show that title, and `grep -l 'lexer.lua' ~/.local/share/nvim/straps/sessions/*.meta` finds the session.
+`:StrapsRenameAuto` asks a cheap model for a title and stores it as the session's durable title, the same `<session>.straps.meta` file straps' own `:StrapsRename {title}` writes. The same rename runs on its own when a session's first run starts and after every few runs (see Automatic renames). The resume picker, the agents buffer and `:StrapsResume<Tab>` show that title, and `grep -l 'lexer.lua' ~/.local/share/nvim/straps/sessions/*.meta` finds the session.
+
+**Each rename, manual or automatic, sends an excerpt of the session transcript (user and assistant text, tool names and tool inputs) to the session's provider.** Automatic renames are on by default; set `auto.enabled = false` to stop them.
 
 The prompt asks for 4 to 12 words naming the concrete subject (file names, function names, commands, error strings) with identifiers kept as written.
 
-## Command
+## Commands
 
 | Form | Effect |
 | --- | --- |
-| `:StrapsRename` | Send a transcript excerpt to the cheap model, store the reply as the title. |
-| `:StrapsRename {title}` | Set the title directly (straps' own behaviour). |
-| `:StrapsRename!` | Open straps' manual prompt, pre-filled with the current title. |
+| `:StrapsRenameAuto` | Send a transcript excerpt to the cheap model, store the reply as the title. Reports `asking <provider> for a title…` at INFO while the request is in flight. |
 
-The command replaces straps' `:StrapsRename`. `plugin/straps_renamer.lua` defines it at load, again on `VimEnter`, and again whenever `plugin/straps.lua` is sourced later (a lazy-loaded straps), so the replacement holds in every load order; `setup()` defines it once more.
+The plugin leaves straps' `:StrapsRename` unchanged: `:StrapsRename {title}` sets the title directly and `:StrapsRename` prompts for it.
 
 ## Automatic renames
 
-The plugin file installs `User StrapsRunStart` / `User StrapsRunEnd` autocmds (augroup `straps_renamer_auto`), so automatic titles work without calling `setup()`. With the defaults, a session is titled when its first run starts and again after every third run ends. A title you typed yourself (`:StrapsRename {title}`, `:StrapsRename!`, or the agents buffer's rename key) is never overwritten; only titles the plugin generated are regenerated. The plugin marks its own titles with a `generated_by` field in the `.meta` file, so the distinction survives a Neovim restart; clearing a title (`:StrapsRename!` with an empty answer) removes the file and re-enables automatic titles. A title you set while a model request is in flight is kept and the model's reply is dropped. Runs that end with reason `blank` or `error` count toward `every_runs` but do not trigger a rename. Subagent sessions (`b:straps_parent` set) are skipped unless `auto.subagents` is true. A first run whose transcript is empty does not use up the `on_start` rename; the next run start tries again.
+The plugin file installs `User StrapsRunStart` / `User StrapsRunEnd` autocmds (augroup `straps_renamer_auto`), so automatic titles work without calling `setup()`. With the defaults, a session is titled when its first run starts and again after every third run ends. A title you typed yourself (`:StrapsRename {title}`, `:StrapsRename`'s prompt, or the agents buffer's rename key) is never overwritten; only titles the plugin generated are regenerated. The plugin writes `generated_by` and `generated_title` beside `title` in the `.meta` file and keeps the file's other fields (straps' provider and model pin). A title counts as generated only while it equals `generated_title`, so a title typed after a generated one stays, and the distinction survives a Neovim restart. Clearing a title (an empty answer at `:StrapsRename`'s prompt) re-enables automatic titles. A title you set while a model request is in flight is kept and the model's reply is dropped. Runs that end with reason `blank` or `error` count toward `every_runs` but do not trigger a rename. Subagent sessions (`b:straps_parent` set) are skipped unless `auto.subagents` is true. A first run whose transcript is empty does not use up the `on_start` rename; the next run start tries again. Any other failed `on_start` attempt (no credentials, HTTP error) uses it up, so the failure warns once per session.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -27,7 +27,11 @@ The plugin file installs `User StrapsRunStart` / `User StrapsRunEnd` autocmds (a
 | `auto.keep_manual` | `true` | Never overwrite a title the plugin did not generate. |
 | `auto.notify` | `true` | Report automatic titles at INFO level; `false` reports nothing on success. Failures, including an error raised inside the handler, are reported at WARN either way. |
 
-`b:straps_renamer_runs` holds the per-session run count the `every_runs` check reads; `b:straps_renamer_started` records that the `on_start` rename was sent.
+`b:straps_renamer_runs` holds the per-session run count the `every_runs` check reads; `b:straps_renamer_started` records that the `on_start` rename was attempted.
+
+## Status
+
+`require("straps_renamer").status()` returns `{ entries, inflight, config }`: `entries` is true once the `fn.renamer_*` registry entries are registered, `inflight` lists the buffer numbers with a rename request in flight, and `config` is the live `config` table.
 
 ## Backend
 
@@ -64,6 +68,8 @@ require("straps_renamer").setup({})
 ```
 
 ## Configuration
+
+`:help straps-renamer` documents setup, commands and status. `:checkhealth straps_renamer` checks registration and curl without a provider request. Setup rejects unknown keys, invalid types, empty model names, and nonfinite or out-of-range numeric limits before changing configuration. `codex_model` remains an optional string; `auto.every_runs = 0` disables periodic titles.
 
 Every key of `require("straps_renamer").config` (`lua/straps_renamer/init.lua`) can be passed to `setup()`:
 

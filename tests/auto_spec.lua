@@ -20,6 +20,7 @@ local state = require("straps.state")
 
 vim.g.loaded_straps = nil
 vim.cmd("source " .. vim.fn.fnameescape(H.straps_root .. "/plugin/straps.lua"))
+local core_rename = vim.api.nvim_get_commands({}).StrapsRename
 vim.g.loaded_straps_renamer = nil
 vim.cmd("source " .. vim.fn.fnameescape(H.root .. "/plugin/straps_renamer.lua"))
 local renamer = require("straps_renamer")
@@ -88,6 +89,13 @@ describe("plugin file", function()
     for _, a in ipairs(cmds) do patterns[a.pattern] = true end
     assert.is_true(patterns.StrapsRunStart)
     assert.is_true(patterns.StrapsRunEnd)
+  end)
+
+  it("defines :StrapsRenameAuto and leaves core's :StrapsRename alone", function()
+    local cmds = vim.api.nvim_get_commands({})
+    assert.is_not_nil(cmds.StrapsRenameAuto)
+    assert.same(core_rename, cmds.StrapsRename)
+    assert.is_false(pcall(vim.api.nvim_get_autocmds, { group = "straps_renamer" }))
   end)
 end)
 
@@ -236,6 +244,23 @@ describe("keep_manual", function()
     assert.equals("typed by hand", state.session_title(path))
   end)
 
+  it("keeps a hand title typed after a generated one when auto fires again", function()
+    renamer.config.auto.every_runs = 1
+    local bufnr, path = new_session("hand after generated")
+    local before = calls()
+    fire("StrapsRunStart", { bufnr = bufnr })
+    wait_calls(before + 1)
+    vim.wait(5000, function() return state.session_title(path) ~= nil end, 20)
+    assert.equals("generated title " .. (before + 1), state.session_title(path))
+    vim.api.nvim_set_current_buf(bufnr)
+    vim.cmd("StrapsRename typed after generated")
+    fire("StrapsRunEnd", { bufnr = bufnr, reason = "ok", turns = 1 })
+    settle()
+    assert.equals(before + 1, calls())
+    assert.equals("typed after generated", state.session_title(path))
+    renamer.config.auto.every_runs = 3
+  end)
+
   it("keeps a title set by hand while the model was replying", function()
     vim.env.PATH = tmp .. "/slow:" .. real_path
     local bufnr, path = new_session("race")
@@ -312,16 +337,41 @@ describe("enabled and notify", function()
     renamer.config.auto.notify = true
   end)
 
-  it("a failed automatic rename warns instead of erroring", function()
+  it("a failed automatic rename warns once instead of erroring", function()
     vim.env.PATH = tmp .. "/missing"
     local bufnr = new_session("no curl")
     local n = #notices
     fire("StrapsRunStart", { bufnr = bufnr })
     vim.wait(5000, function() return #notices > n end, 20)
-    vim.env.PATH = tmp .. "/ok:" .. real_path
     assert.equals(n + 1, #notices)
     assert.equals(vim.log.levels.WARN, notices[#notices].level)
     assert.is_not_nil(notices[#notices].msg:find("curl", 1, true), notices[#notices].msg)
+    fire("StrapsRunStart", { bufnr = bufnr })
+    vim.wait(500, function() return #notices > n + 1 end, 20)
+    vim.env.PATH = tmp .. "/ok:" .. real_path
+    assert.equals(n + 1, #notices)
+  end)
+
+  it("a rename refused before sending warns on the first run start only", function()
+    local registry = require("straps.registry")
+    local saved = registry.get("fn.provider_pref")
+    registry.define({ name = "fn.provider_pref", kind = "fn", doc = "test: unreadable",
+      source = [[return function() error("pref file unreadable") end]] })
+    straps.config.provider = nil
+    local bufnr = new_session("pref error")
+    local before, n = calls(), #notices
+    fire("StrapsRunStart", { bufnr = bufnr })
+    local first = #notices
+    fire("StrapsRunStart", { bufnr = bufnr })
+    fire("StrapsRunStart", { bufnr = bufnr })
+    local after = #notices
+    straps.config.provider = "anthropic"
+    registry.define({ name = "fn.provider_pref", kind = "fn", doc = saved.doc, source = saved.source })
+    assert.equals(n + 1, first)
+    assert.equals(vim.log.levels.WARN, notices[n + 1].level)
+    assert.is_not_nil(notices[n + 1].msg:find("pref file unreadable", 1, true), notices[n + 1].msg)
+    assert.equals(n + 1, after)
+    assert.equals(before, calls())
   end)
 
   it("an error raised inside the handler is reported, not swallowed", function()
