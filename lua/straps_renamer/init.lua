@@ -118,7 +118,9 @@ function M.rename(bufnr, cb, opts)
   end
   local prompt = registry.call("fn.renamer_prompt", excerpt)
   local request = require("straps_renamer.request")
-  local provider = request.provider_for(bufnr)
+  local ok_provider, provider, provider_err = pcall(request.provider_for, bufnr)
+  if not ok_provider then return fail(tostring(provider), failure_level) end
+  if provider_err then return fail(provider_err, failure_level) end
   local title_at_send = M.title_of(path)
   inflight[bufnr] = true
   local ok_send, send_err = pcall(request.send, provider, cfg, prompt, function(raw, err)
@@ -142,7 +144,7 @@ function M.rename(bufnr, cb, opts)
       vim.notify("straps_renamer: session titled " .. title, opts.quiet and vim.log.levels.INFO or nil)
     end
     cb(title)
-  end)
+  end, bufnr)
   if not ok_send then
     inflight[bufnr] = nil
     return fail("could not start the request: " .. tostring(send_err), failure_level)

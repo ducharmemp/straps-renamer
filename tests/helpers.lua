@@ -4,6 +4,9 @@
 -- injected into each spec chunk's environment, not into chunks loaded with
 -- dofile, so the step() sequencer is defined in the spec file.
 
+vim.env.XDG_CONFIG_HOME = vim.fn.tempname()
+vim.fn.mkdir(vim.env.XDG_CONFIG_HOME, "p")
+
 local here = debug.getinfo(1, "S").source:sub(2)
 local root = vim.fn.fnamemodify(here, ":p:h:h")
 local straps_root = vim.env.STRAPS_ROOT
