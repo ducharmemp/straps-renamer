@@ -31,14 +31,20 @@ The plugin file installs `User StrapsRunStart` / `User StrapsRunEnd` autocmds (a
 
 ## Backend
 
-The request goes to the backend the session uses, resolved the way `fn.provider` resolves it: `vim.b[bufnr].straps_provider`, then `config.provider`, then the `:StrapsProvider` preference file, then Anthropic. Keys come from straps' `fn.api_key` / `fn.openai_api_key`, so no extra credentials are needed.
+The request uses straps' provider resolver: `vim.b[bufnr].straps_provider`, then `config.provider`, then the `:StrapsProvider` preference file, then Anthropic. Renamer calls the provider slot's credential function (`fn.anthropic_api_key`, `fn.openai_api_key`, or `fn.llamacpp_api_key`) and uses straps' URL validation and auth-header construction. Stored keys, environment keys, ChatGPT login, and Codex login use the same credential selection as straps. Renamer needs no separate credentials. Provider-preference errors stop the rename.
 
 | Provider | Endpoint | Default model |
 | --- | --- | --- |
 | anthropic | `{base_url}/v1/messages` (non-streaming, no `thinking` block) | `claude-haiku-4-5-20251001` |
-| openai | `{openai_base_url}/v1/responses` (non-streaming, `store=false`, no `reasoning` field) | `gpt-4.1-mini` |
+| openai, API key or ChatGPT login | `{openai_base_url}/v1/responses` (non-streaming, `store=false`, no `reasoning` field) | `gpt-4.1-mini` |
+| openai, Codex login | straps' Codex Responses endpoint (streaming, `store=false`) | Session's selected OpenAI model; override with `codex_model` |
+| llamacpp | `{llamacpp_base_url}/v1/messages` (non-streaming, optional Bearer key) | Session's selected llama.cpp model |
 
-Both requests are one-shot: no extended thinking on Anthropic and no reasoning on OpenAI, whatever `:StrapsEffort` is set to for the session. If you point `openai_model` at a reasoning model (the `gpt-5` or `o` families), the model reasons at its own default and the reasoning tokens count against `openai_max_output_tokens`; raise that cap or keep a non-reasoning model.
+Renamer does not apply the session's `:StrapsEffort`. Anthropic and llama.cpp requests omit thinking. API-key and ChatGPT requests omit reasoning; a reasoning model can spend `openai_max_output_tokens` on reasoning, so raise that cap or keep a non-reasoning `openai_model`.
+
+Codex requests use `fn.openai_codex_request`, including its account/session headers and lowest supported reasoning level when the model entry supplies reasoning metadata. Codex removes `max_output_tokens`. Select a Codex-supported session model or set `codex_model`; inheriting a model does not establish that Codex supports it. In particular, straps' fallback OpenAI model can be absent from the Codex catalog.
+
+Expiring login credentials refresh through straps without blocking the editor. An HTTP 401 triggers one refresh and retry for ChatGPT or Codex credentials. API keys are not retried. Each asynchronous wait uses `timeout_ms`; a timed-out refresh may still complete in straps, but Renamer ignores its late callback. Login credentials retain straps' restriction to the default OpenAI origin.
 
 ## Install
 
@@ -66,11 +72,12 @@ Every key of `require("straps_renamer").config` (`lua/straps_renamer/init.lua`) 
 | `anthropic_model` | `claude-haiku-4-5-20251001` | Model for the anthropic backend. |
 | `anthropic_max_tokens` | `200` | `max_tokens` for the Messages request. |
 | `openai_model` | `gpt-4.1-mini` | Model for the openai backend; a non-reasoning model. |
-| `openai_max_output_tokens` | `200` | `max_output_tokens`. A truncated reply is reported as `response incomplete (max_output_tokens)`. |
+| `openai_max_output_tokens` | `200` | API-key/ChatGPT `max_output_tokens`; Codex omits it. A truncated reply is reported as `response incomplete (max_output_tokens)`. |
+| `codex_model` | unset | Override the inherited OpenAI session model for Codex login. Must name a model Codex supports. |
 | `max_excerpt_bytes` | `12000` | Excerpt size cap (minimum 64); longer transcripts keep the head and tail around a `[...]` marker. |
 | `tool_input_bytes` | `160` | Per-tool-call input cap in the excerpt. |
 | `max_title_chars` | `80` | Title length cap, in characters. |
-| `timeout_ms` | `30000` | curl `--max-time`; a non-numeric value falls back to 30000. |
+| `timeout_ms` | `30000` | Timeout for each asynchronous wait and curl `--max-time`; a non-numeric or non-positive value falls back to 30000. |
 
 ## Registry entries
 
@@ -90,4 +97,4 @@ busted tests/title_spec.lua
 for t in tests/*_spec.lua; do busted "$t" || exit 1; done
 ```
 
-`STRAPS_ROOT` names the straps checkout the specs load; the devShell sets it to the flake input and `../straps` is the fallback. The specs run against fake `curl` binaries and never reach the network.
+`STRAPS_ROOT` names the straps checkout the specs load; the devShell sets it to the flake input and `../straps` is the fallback. The specs use fake `curl` binaries or mocked transport and never reach the network. The shared bootstrap isolates `XDG_CONFIG_HOME` before straps setup so saved credentials do not affect the tests.
